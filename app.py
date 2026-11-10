@@ -172,7 +172,12 @@ def cargar_estimados(path, mtime):
     ws = load_workbook(path, data_only=True).active
     filas = list(ws.iter_rows(values_only=True))
     hdr = next(i for i, r in enumerate(filas) if r[1] and str(r[1]).strip().lower() == "exportadora")
-    cols = [(j, int(float(v))) for j, v in enumerate(filas[hdr]) if j >= 2 and v not in (None, "")]
+    cols = []
+    for j in range(2, len(filas[hdr])):
+        try:
+            cols.append((j, int(float(filas[hdr][j]))))
+        except (TypeError, ValueError):
+            break  # termina la zona de semanas
     out = []
     for r in filas:
         clave = str(r[1]).strip().lower() if r[1] else ""
