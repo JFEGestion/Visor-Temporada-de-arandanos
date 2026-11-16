@@ -194,6 +194,12 @@ def msel(label, serie, key):
     sel = st.sidebar.multiselect(label, ops, default=ops, key=key)
     return serie.isin(sel)
 
+def sel_union(label, serie_a, serie_b, key):
+    """Multiselect con opciones de recepción y proceso; devuelve los valores elegidos."""
+    ops = sorted(set(serie_a.dropna().unique()) | set(serie_b.dropna().unique()))
+    return st.sidebar.multiselect(label, ops, default=ops, key=key)
+
+
 def rango_fechas(label, serie, key):
     if serie.empty:
         return pd.Series(True, index=serie.index)
@@ -388,8 +394,10 @@ def pagina_proceso(rec, proc):
         st.info("Aún no hay proceso cargado.")
         return
     st.sidebar.subheader("Filtros de proceso")
-    base = (msel("Exportadora", proc.exportadora, "p_exp") & msel("Condición", proc.condicion, "p_con")
-            & msel("Variedad", proc.variedad, "p_var"))
+    sel_e = sel_union("Exportadora", proc.exportadora, rec.exportadora, "p_exp")
+    sel_c = sel_union("Condición", proc.condicion, rec.condicion, "p_con")
+    sel_v = sel_union("Variedad", proc.variedad, rec.variedad, "p_var")
+    base = proc.exportadora.isin(sel_e) & proc.condicion.isin(sel_c) & proc.variedad.isin(sel_v)
     m = (base & rango_fechas("Fecha proceso", proc.fecha_proceso, "p_fec") & msel("Línea (sala)", proc.sala, "p_sal")
          & msel("Turno", proc.turno, "p_tur") & msel("Tipo de proceso", proc.tipo_proceso, "p_tip"))
     d = proc[m]
@@ -448,8 +456,7 @@ def pagina_proceso(rec, proc):
     st.subheader("Acumulado procesado vs recibido")
     st.caption("Recibido = aceptado (sin rechazo) y sin bulk. Procesado = KN totales incl. merma. "
                "Usa los filtros de exportadora, condición y variedad.")
-    r = rec[~rec.bulk & rec.exportadora.isin(proc.exportadora[base].unique()) & rec.variedad.isin(proc.variedad[base].unique())
-            & rec.condicion.isin(proc.condicion[base].unique())]
+    r = rec[~rec.bulk & rec.exportadora.isin(sel_e) & rec.variedad.isin(sel_v) & rec.condicion.isin(sel_c)]
     pr = proc[base]
     dias = pd.DataFrame({"fecha": sorted(set(r.fecha) | set(pr.fecha))})
     dias["Recibido aceptado acum."] = dias.fecha.map(r[~r.rech].groupby("fecha").kn.sum()).fillna(0).cumsum()
