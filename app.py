@@ -309,6 +309,18 @@ def tabla_control(est, rec, corte):
     t["% rechazo"] = np.where(t["Recibido total"] > 0, t["Rechazado"] / t["Recibido total"], np.nan)
     return t.rename(columns={"exportadora": "Exportadora", "condicion_est": "Condición"})
 
+def kpis_control(tot):
+    c = st.columns(6)
+    c[0].metric("Estimado temporada", f0(tot["Estimado temporada"]))
+    c[1].metric("Recibido total", f0(tot["Recibido total"]))
+    c[2].metric("Por recibir (saldo)", f0(tot["Por recibir (saldo)"]))
+    c[3].metric("Avance temporada", pct(tot["Recibido total"] / tot["Estimado temporada"] if tot["Estimado temporada"] else np.nan))
+    dv = tot["Desviación (KN)"]
+    c[4].metric("Desviación a la fecha", f0(dv), f"{pct(dv / tot['Estimado a la fecha']) if tot['Estimado a la fecha'] else '-'}")
+    c[5].metric("Rechazado", f0(tot["Rechazado"]), pct(tot["Rechazado"] / tot["Recibido total"] if tot["Recibido total"] else np.nan),
+                delta_color="off")
+
+
 def pagina_control(rec, est_raw, anio_ini):
     st.header("🎯 Control de recepción vs estimado (KN)")
     est = est_raw.copy()
@@ -332,16 +344,11 @@ def pagina_control(rec, est_raw, anio_ini):
                "el rechazo cuenta como recibido.")
 
     t = tabla_control(est, rec, corte)
-    tot = t.sum(numeric_only=True)
-    c = st.columns(6)
-    c[0].metric("Estimado temporada", f0(tot["Estimado temporada"]))
-    c[1].metric("Recibido total", f0(tot["Recibido total"]))
-    c[2].metric("Por recibir (saldo)", f0(tot["Por recibir (saldo)"]))
-    c[3].metric("Avance temporada", pct(tot["Recibido total"] / tot["Estimado temporada"] if tot["Estimado temporada"] else np.nan))
-    dv = tot["Desviación (KN)"]
-    c[4].metric("Desviación a la fecha", f0(dv), f"{pct(dv / tot['Estimado a la fecha']) if tot['Estimado a la fecha'] else '-'}")
-    c[5].metric("Rechazado", f0(tot["Rechazado"]), pct(tot["Rechazado"] / tot["Recibido total"] if tot["Recibido total"] else np.nan),
-                delta_color="off")
+    kpis_control(t.sum(numeric_only=True))
+    por_exp = t.groupby("Exportadora").sum(numeric_only=True)
+    for nombre, fila in por_exp.iterrows():
+        st.markdown(f"**{nombre}**")
+        kpis_control(fila)
 
     w = pd.DataFrame({"monday": semanas})
     w["Estimado"] = w.monday.map(est.groupby("monday").kg.sum()).fillna(0)
@@ -468,14 +475,15 @@ def pagina_proceso(rec, proc):
     fig.update_layout(legend_title="", yaxis_title="KN", xaxis_title="")
     mostrar(fig)
 
-    s = r.groupby("exportadora").apply(lambda x: pd.Series({
+    s = r.groupby(["exportadora", "condicion"]).apply(lambda x: pd.Series({
         "Recibido total": x.kn.sum(), "Rechazado": x[x.rech].kn.sum(), "Aceptado": x[~x.rech].kn.sum()}),
         include_groups=False).reset_index()
-    s["Procesado"] = s.exportadora.map(pr.groupby("exportadora").kn.sum()).fillna(0)
+    pk = pr.groupby(["exportadora", "condicion"]).kn.sum().rename("Procesado").reset_index()
+    s = s.merge(pk, on=["exportadora", "condicion"], how="left").fillna({"Procesado": 0})
     s["Pendiente por procesar"] = s.Aceptado - s.Procesado
     s["% procesado"] = (s.Procesado / s.Aceptado.replace(0, np.nan) * 100).round(1)
-    s = s.rename(columns={"exportadora": "Exportadora"})
-    st.subheader("Saldo pendiente de procesar por exportadora")
+    s = s.rename(columns={"exportadora": "Exportadora", "condicion": "Condición"}).sort_values(["Exportadora", "Condición"])
+    st.subheader("Saldo pendiente de procesar por exportadora y condición")
     tabla(s.round(0).assign(**{"% procesado": s["% procesado"]}))
     boton_excel(s.round(0), "saldo_proceso", "x_p_s")
     with st.expander("Ver acumulado diario"):
