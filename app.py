@@ -47,16 +47,31 @@ def pct(x):
     return f"{x:.1%}".replace(".", ",") if pd.notna(x) else "-"
 
 def mostrar(fig):
+    fig.update_layout(separators=",.")          # decimal con coma, miles con punto
+    fig.update_yaxes(tickformat=",.0f")
     try:
         st.plotly_chart(fig, width="stretch")
     except TypeError:
         st.plotly_chart(fig, use_container_width=True)
 
+COLUMNAS_ID = {"guia", "lote", "pallet", "numero_proceso"}   # identificadores: sin separador de miles
+
+def fmt_num(x):
+    if pd.isna(x):
+        return "-"
+    if abs(x - round(x)) < 1e-9:
+        return f"{x:,.0f}".replace(",", ".")
+    return f"{x:,.1f}".replace(",", "§").replace(".", ",").replace("§", ".")
+
 def tabla(df, key=None):
+    d = df.copy()
+    for c in d.columns:
+        if c not in COLUMNAS_ID and pd.api.types.is_numeric_dtype(d[c]) and not pd.api.types.is_bool_dtype(d[c]):
+            d[c] = d[c].map(fmt_num)
     try:
-        st.dataframe(df, width="stretch", hide_index=True)
+        st.dataframe(d, width="stretch", hide_index=True)
     except TypeError:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(d, use_container_width=True, hide_index=True)
 
 def boton_excel(df, nombre, key):
     buf = io.BytesIO()
@@ -164,6 +179,8 @@ def cargar_todo(p_rec, m_rec, p_proc, m_proc):
     rec = preparar_recepcion(leer(p_rec))
     proc = preparar_proceso(leer(p_proc))
     rec = reclasificar(rec, proc)
+    cond_lote = rec.groupby("lote").condicion.agg(lambda x: x.value_counts().index[0]) if len(rec) else pd.Series(dtype=object)
+    proc["condicion_rec"] = proc["lote"].map(cond_lote).fillna(proc["condicion"])
     rec["estado"] = np.where(rec["rech"], "Rechazada", "Aceptada")
     return rec, proc
 
@@ -405,6 +422,7 @@ def pagina_proceso(rec, proc):
     sel_c = sel_union("Condición", proc.condicion, rec.condicion, "p_con")
     sel_v = sel_union("Variedad", proc.variedad, rec.variedad, "p_var")
     base = proc.exportadora.isin(sel_e) & proc.condicion.isin(sel_c) & proc.variedad.isin(sel_v)
+    base_rec = proc.exportadora.isin(sel_e) & proc.condicion_rec.isin(sel_c) & proc.variedad.isin(sel_v)
     m = (base & rango_fechas("Fecha proceso", proc.fecha_proceso, "p_fec") & msel("Línea (sala)", proc.sala, "p_sal")
          & msel("Turno", proc.turno, "p_tur") & msel("Tipo de proceso", proc.tipo_proceso, "p_tip"))
     d = proc[m]
@@ -464,7 +482,7 @@ def pagina_proceso(rec, proc):
     st.caption("Recibido = aceptado (sin rechazo) y sin bulk. Procesado = KN totales incl. merma. "
                "Usa los filtros de exportadora, condición y variedad.")
     r = rec[~rec.bulk & rec.exportadora.isin(sel_e) & rec.variedad.isin(sel_v) & rec.condicion.isin(sel_c)]
-    pr = proc[base]
+    pr = proc[base_rec]
     dias = pd.DataFrame({"fecha": sorted(set(r.fecha) | set(pr.fecha))})
     dias["Recibido aceptado acum."] = dias.fecha.map(r[~r.rech].groupby("fecha").kn.sum()).fillna(0).cumsum()
     dias["Rechazado acum."] = dias.fecha.map(r[r.rech].groupby("fecha").kn.sum()).fillna(0).cumsum()
@@ -478,14 +496,28 @@ def pagina_proceso(rec, proc):
     s = r.groupby(["exportadora", "condicion"]).apply(lambda x: pd.Series({
         "Recibido total": x.kn.sum(), "Rechazado": x[x.rech].kn.sum(), "Aceptado": x[~x.rech].kn.sum()}),
         include_groups=False).reset_index()
-    pk = pr.groupby(["exportadora", "condicion"]).kn.sum().rename("Procesado").reset_index()
+    pk = (pr.groupby(["exportadora", "condicion_rec"]).kn.sum().rename("Procesado").reset_index()
+          .rename(columns={"condicion_rec": "condicion"}))
     s = s.merge(pk, on=["exportadora", "condicion"], how="left").fillna({"Procesado": 0})
     s["Pendiente por procesar"] = s.Aceptado - s.Procesado
     s["% procesado"] = (s.Procesado / s.Aceptado.replace(0, np.nan) * 100).round(1)
     s = s.rename(columns={"exportadora": "Exportadora", "condicion": "Condición"}).sort_values(["Exportadora", "Condición"])
+    tot = {"Exportadora": "TOTAL", "Condición": "", **{c: s[c].sum() for c in
+           ["Recibido total", "Rechazado", "Aceptado", "Procesado", "Pendiente por procesar"]}}
+    tot["% procesado"] = round(tot["Procesado"] / tot["Aceptado"] * 100, 1) if tot["Aceptado"] else np.nan
+    s = pd.concat([s, pd.DataFrame([tot])], ignore_index=True)
     st.subheader("Saldo pendiente de procesar por exportadora y condición")
     tabla(s.round(0).assign(**{"% procesado": s["% procesado"]}))
     boton_excel(s.round(0), "saldo_proceso", "x_p_s")
+    st.caption("El procesado se asigna a la condición con que se recibió el lote.")
+    cd = pr[pr.condicion != pr.condicion_rec].groupby(["exportadora", "condicion_rec", "condicion", "producto"]).agg(
+        **{"KN": ("kn", "sum"), "Lotes": ("lote", "nunique")}).reset_index()
+    cd = cd.rename(columns={"exportadora": "Exportadora", "condicion_rec": "Condición recibida",
+                            "condicion": "Condición proceso", "producto": "Producto"})
+    if len(cd):
+        st.subheader("Fruta procesada con condición distinta a la recibida")
+        tabla(cd.round(0))
+        boton_excel(cd.round(0), "cambio_condicion", "x_p_cc")
     with st.expander("Ver acumulado diario"):
         tabla(dias.round(0))
         boton_excel(dias.round(0), "acumulado_proceso", "x_p_a")
